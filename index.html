@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VRM Interactive Viewer - High Quality Lighting</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            /* 背景を少し落ち着いた色にして、ライティングを目立たせる */
+            background-color: #ffecd2;
+            background-image: linear-gradient(120deg, #a1c4fd 0%, #c2e9fb 100%);
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            user-select: none;
+        }
+        
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+
+        /* UI Overlay */
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #drop-zone-msg {
+            display: none;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 40px;
+            border-radius: 20px;
+            border: 3px dashed #aaa;
+            text-align: center;
+            color: #555;
+            font-weight: bold;
+            pointer-events: auto;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        #drop-zone-msg:hover {
+            background: rgba(255, 255, 255, 1.0);
+            border-color: #88ccff;
+            transform: scale(1.05);
+        }
+
+        #message-box {
+            position: absolute;
+            top: 15%;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px 30px;
+            border-radius: 30px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+            opacity: 0;
+            transition: opacity 0.5s, top 0.5s;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        #message-box::after {
+            content: '';
+            position: absolute;
+            bottom: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-width: 10px 10px 0;
+            border-style: solid;
+            border-color: rgba(255, 255, 255, 0.95) transparent;
+            display: block;
+            width: 0;
+        }
+
+        #loading {
+            display: none;
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: #fff;
+            background: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            color: rgba(0,0,0,0.5);
+            font-size: 12px;
+            pointer-events: none;
+            text-shadow: 1px 1px 2px rgba(255,255,255,0.8);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-container">
+        <div id="message-box">こんにちは！</div>
+        
+        <!-- File Input (Hidden) -->
+        <input type="file" id="file-input" accept=".vrm" style="display: none;">
+        
+        <div id="drop-zone-msg">
+            <div style="font-size: 40px; margin-bottom: 10px;">📂</div>
+            読み込みエラー<br>
+            クリックして別のファイルを選択
+        </div>
+    </div>
+
+    <div id="loading">Loading Sample Model...</div>
+    <div id="controls">Mouse: Look / Click: Jump / Drag & Drop: Change VRM</div>
+
+    <!-- Import Maps for Three.js and VRM -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+                "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.0/lib/three-vrm.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+        // --- 設定 ---
+        const CONFIG = {
+            waveInterval: 8000,
+            blinkInterval: 3000,
+            // ローカルのVRMファイルパス
+            sampleUrl: './AliciaSolid.vrm'
+        };
+
+        // --- グローバル変数 ---
+        let scene, camera, renderer;
+        let currentVrm = null;
+        let clock = new THREE.Clock();
+        
+        let mouse = new THREE.Vector2();
+        let lookAtTarget = new THREE.Object3D(); 
+        
+        let isWaving = false;
+        
+        function init() {
+            // シーン設定
+            scene = new THREE.Scene();
+            scene.add(lookAtTarget); 
+
+            // カメラ設定
+            camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+            camera.position.set(0, 1.4, 3.0); 
+
+            // レンダラー設定 (高画質化)
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.outputColorSpace = THREE.SRGBColorSpace; 
+            
+            // ★ トーンマッピングの設定（色を鮮やかに、白飛びを抑える）
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+
+            // 影の設定を有効化
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.SoftShadowMap;
+
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // --- ★ ライティング設定 (スタジオ風) ---
+            createStudioLighting();
+
+            // グリッド（床）
+            const gridHelper = new THREE.GridHelper(10, 10, 0xffffff, 0xffffff);
+            gridHelper.material.opacity = 0.2;
+            gridHelper.material.transparent = true;
+            scene.add(gridHelper);
+
+            // イベントリスナー
+            window.addEventListener('resize', onWindowResize, false);
+            window.addEventListener('mousemove', onMouseMove, false);
+            window.addEventListener('mousedown', onMouseDown, false);
+            
+            setupDragAndDrop();
+
+            // ループ開始
+            animate();
+            
+            scheduleBlink();
+            setInterval(triggerWave, CONFIG.waveInterval);
+
+            // 初期ロード実行
+            loadVRM(CONFIG.sampleUrl);
+        }
+
+        // スタジオライティングを作成する関数
+        function createStudioLighting() {
+            // 1. 環境光 (全体を柔らかく照らすベース)
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+            scene.add(ambientLight);
+
+            // 2. メインライト (Key Light) - 斜め前から強く照らす
+            const keyLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            keyLight.position.set(2.0, 2.0, 1.0);
+            keyLight.castShadow = true;
+            keyLight.shadow.mapSize.width = 2048; // 影を綺麗に
+            keyLight.shadow.mapSize.height = 2048;
+            keyLight.shadow.bias = -0.0001;
+            scene.add(keyLight);
+
+            // 3. フィルライト (Fill Light) - 影になる部分を少し青みがかった光で和らげる
+            const fillLight = new THREE.DirectionalLight(0xb0c4de, 0.5);
+            fillLight.position.set(-1.0, 1.0, 1.0);
+            scene.add(fillLight);
+
+            // 4. リムライト (Rim Light) - 背後から輪郭を光らせる（重要！）
+            // キャラクターを背景から浮き上がらせる効果
+            const rimLight = new THREE.SpotLight(0xffeeb1, 2.0); // 少し暖色系で強く
+            rimLight.position.set(0, 2.0, -2.0);
+            rimLight.lookAt(0, 1.0, 0);
+            scene.add(rimLight);
+        }
+
+        // --- VRM読み込み処理 ---
+        function loadVRM(url) {
+            const loader = new GLTFLoader();
+            
+            loader.register((parser) => {
+                return new VRMLoaderPlugin(parser);
+            });
+
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('drop-zone-msg').style.display = 'none';
+
+            loader.load(
+                url,
+                (gltf) => {
+                    const vrm = gltf.userData.vrm;
+
+                    if (currentVrm) {
+                        scene.remove(currentVrm.scene);
+                        VRMUtils.deepDispose(currentVrm.scene);
+                    }
+
+                    currentVrm = vrm;
+                    scene.add(vrm.scene);
+
+                    // 影を落とす設定
+                    vrm.scene.traverse((obj) => {
+                        if (obj.isMesh) {
+                            obj.castShadow = true;
+                            obj.receiveShadow = true;
+                            // 半透明描画の順序問題を軽減
+                            if (obj.material.transparent) {
+                                obj.renderOrder = 1; 
+                            }
+                        }
+                    });
+
+                    VRMUtils.rotateVRM0(vrm); 
+                    
+                    camera.position.set(0, 1.3, 2.5);
+                    camera.lookAt(0, 1.0, 0); 
+
+                    vrm.lookAt.target = lookAtTarget;
+                    
+                    console.log("VRM Loaded");
+                    document.getElementById('loading').style.display = 'none';
+                    showMessage("よろしくね！");
+                    setTimeout(hideMessage, 3000);
+                },
+                (progress) => {
+                    console.log('Loading model...', 100.0 * (progress.loaded / progress.total), '%');
+                },
+                (error) => {
+                    console.error(error);
+                    document.getElementById('loading').style.display = 'none';
+                    const dropMsg = document.getElementById('drop-zone-msg');
+                    dropMsg.style.display = 'block';
+                    dropMsg.innerHTML = '<div style="font-size: 40px; margin-bottom: 10px;">📂</div>読み込みエラー<br>クリックして別のファイルを選択';
+                }
+            );
+        }
+
+        function setupDragAndDrop() {
+            const dropZone = document.getElementById('drop-zone-msg');
+            const fileInput = document.getElementById('file-input');
+            
+            dropZone.addEventListener('click', () => fileInput.click());
+            
+            fileInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) processFile(file);
+            });
+
+            window.addEventListener('dragover', (e) => e.preventDefault());
+            window.addEventListener('drop', (e) => {
+                e.preventDefault();
+                const file = e.dataTransfer.files[0];
+                if (file) processFile(file);
+            });
+        }
+
+        function processFile(file) {
+            if (!file.name.endsWith('.vrm')) {
+                alert('VRMファイルを選択してください (.vrm)');
+                return;
+            }
+            const url = URL.createObjectURL(file);
+            loadVRM(url);
+        }
+
+        // --- アニメーション & インタラクション ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            if (lookAtTarget) {
+                lookAtTarget.position.x = mouse.x * 1.0;
+                lookAtTarget.position.y = 1.3 + (mouse.y * 0.5); 
+                lookAtTarget.position.z = 1.0; 
+            }
+        }
+
+        function onMouseDown() {
+            jump();
+        }
+
+        function scheduleBlink() {
+            const nextBlinkTime = Math.random() * 2000 + 3000;
+            setTimeout(() => {
+                blink();
+                scheduleBlink();
+            }, nextBlinkTime);
+        }
+
+        function blink() {
+            if (!currentVrm) return;
+            
+            let blinkVal = 0;
+            const duration = 150;
+            const startTime = Date.now();
+
+            const interval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                if (elapsed >= duration) {
+                    currentVrm.expressionManager.setValue('blink', 0);
+                    currentVrm.expressionManager.update(); 
+                    clearInterval(interval);
+                    return;
+                }
+
+                const progress = elapsed / duration;
+                blinkVal = Math.sin(progress * Math.PI);
+                
+                currentVrm.expressionManager.setValue('blink', blinkVal);
+                currentVrm.expressionManager.update();
+            }, 16);
+        }
+
+        function triggerWave() {
+            if (!currentVrm || isWaving) return;
+            isWaving = true;
+            showMessage("👋");
+            
+            setTimeout(() => {
+                isWaving = false;
+                hideMessage();
+            }, 3000);
+        }
+
+        function jump() {
+            if (!currentVrm) return;
+            
+            const rootBone = currentVrm.scene; 
+            if (rootBone.position.y > 0.01) return;
+
+            const jumpDuration = 500;
+            const startTime = Date.now();
+
+            const interval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                if (elapsed >= jumpDuration) {
+                    rootBone.position.y = 0;
+                    clearInterval(interval);
+                    return;
+                }
+                const progress = elapsed / jumpDuration;
+                rootBone.position.y = Math.sin(progress * Math.PI) * 0.3;
+            }, 16);
+            
+            currentVrm.expressionManager.setValue('happy', 1.0);
+            setTimeout(() => {
+                currentVrm.expressionManager.setValue('happy', 0.0);
+            }, 1000);
+            
+            showMessage("わーい！");
+        }
+
+        function showMessage(text) {
+            const msgBox = document.getElementById('message-box');
+            msgBox.innerText = text;
+            msgBox.style.opacity = 1;
+            msgBox.style.top = "10%";
+        }
+
+        function hideMessage() {
+            const msgBox = document.getElementById('message-box');
+            msgBox.style.opacity = 0;
+            msgBox.style.top = "15%";
+        }
+
+        // --- メインループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const deltaTime = clock.getDelta();
+            const time = clock.elapsedTime;
+
+            if (currentVrm) {
+                currentVrm.update(deltaTime);
+
+                if (isWaving) {
+                    const rArm = currentVrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+                    const rForeArm = currentVrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+
+                    if (rArm && rForeArm) {
+                        const waveSpeed = 10;
+                        const waveAngle = Math.sin(time * waveSpeed) * 0.3;
+
+                        const qArm = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 1.2 + waveAngle * 0.1, 'XYZ')); 
+                        const qForeArm = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.5 + waveAngle, 'XYZ'));
+                        
+                        rArm.rotation.setFromQuaternion(qArm);
+                        rForeArm.rotation.setFromQuaternion(qForeArm);
+                    }
+                } else {
+                    const rArm = currentVrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+                    if (rArm) {
+                        const breath = Math.sin(time) * 0.05;
+                        rArm.rotation.z = -1.2 + breath;
+                        rArm.rotation.x = 0.2; 
+                    }
+                    
+                    const lArm = currentVrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+                    if (lArm) {
+                         const breath = Math.sin(time) * 0.05;
+                        lArm.rotation.z = 1.2 - breath;
+                        lArm.rotation.x = -0.2;
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // 初期化
+        init();
+
+    </script>
+</body>
+</html>
