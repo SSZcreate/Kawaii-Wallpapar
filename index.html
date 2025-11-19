@@ -617,7 +617,7 @@
                 const cameraDirection = new THREE.Vector3();
                 camera.getWorldDirection(cameraDirection);
                 const targetRotation = Math.atan2(cameraDirection.x, cameraDirection.z);
-                currentVrm.scene.rotation.y = targetRotation + Math.PI; // カメラの方を向く
+                currentVrm.scene.rotation.y = targetRotation; // カメラの方を向く（180度オフセット削除）
             }
             
             // ランダムな待機時間後に次の目的地へ
